@@ -1,0 +1,6 @@
+simulator sanity check, energy drift per example
+epsilon 0.02
+integrator DOP853 rtol 1e-10 atol 1e-12
+example_0 max_relative_energy_drift 1.2822382540892922e-09 accepted True
+example_1 max_relative_energy_drift 9.700071535217065e-10 accepted True
+example_2 max_relative_energy_drift 7.684354193426447e-10 accepted True

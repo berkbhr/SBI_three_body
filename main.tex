@@ -1,0 +1,526 @@
+\documentclass[12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath}
+\usepackage{mathrsfs}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+
+\DeclareMathOperator{\logit}{logit}
+\DeclareMathOperator*{\argmax}{arg\,max}
+\DeclareMathOperator*{\argmin}{arg\,min}
+
+\usepackage[
+    a4paper,
+    left = 2.5cm,
+    right = 2.5cm,
+    top = 2.5cm,
+    bottom = 2.5cm
+]{geometry}
+
+\usepackage{graphicx}
+\usepackage[headings]{fullpage}
+\usepackage{hyperref}
+\usepackage{fancyhdr}
+\usepackage{IEEEtrantools}
+\usepackage{xcolor}
+
+%\usepackage[
+    %backend=biber,
+    %style=apa,
+    %maxcitenames=2,
+    %mincitenames=1,
+    %sorting=ynt
+    %]{biblatex}
+% \addbibresource{bibfile.bib} 
+\usepackage[numbers,sort&compress]{natbib} 
+
+\setlength{\headheight}{15pt}
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{Angel Gómez, Berk Bahar, Jingyu Zheng} 
+\lhead{SBI - Three Body Problem}
+\rfoot{Page \thepage}
+
+\begin{document}
+
+
+\pagestyle{empty} 
+
+\begin{titlepage}
+        \centering
+        \vspace*{\baselineskip}
+        
+        {\huge Inferring Initial Conditions in the\\ Three Body Problem}\\[0.2\baselineskip]
+        
+        \vspace*{\baselineskip}
+        
+        {\Large --- Project Report ---\\
+          Simulation Based Inference\\
+          Group 33\\
+          [\baselineskip]}
+        \vspace*{\baselineskip}
+        
+        {\LARGE 
+            Angel Gómez, 280844\\[10pt]
+            Berk Bahar, 274028\\[10pt]
+            Jingyu Zheng, 274006\\[10pt]
+        }
+        
+        \vfill
+        August 2026 \par
+        \vspace*{\baselineskip}
+        {\itshape TU Dortmund University\par}
+\end{titlepage}
+
+\tableofcontents 
+\clearpage       
+
+
+\pagestyle{fancy}       
+\pagenumbering{arabic}   
+
+
+
+
+
+
+\section{Introduction}
+
+The three-body problem is one of the most famous challenges in physics: predicting
+the motion of three massive bodies interacting through gravity. Although the laws of
+Newtonian gravity are simple, the behaviour of three interacting bodies is not.
+Unlike a two-body system, which has a closed-form solution, a three-body system is
+\emph{non-integrable} and generically \emph{chaotic}, so its long-term behaviour
+becomes effectively unpredictable.
+ 
+More technically, if two systems start from almost identical initial conditions,
+their trajectories do not stay close: they separate exponentially fast, with the
+separation growing as $e^{\lambda t}$, where $\lambda$ is the Lyapunov exponent.
+Even the tiniest initial difference eventually leads to completely different outcomes.
+ 
+
+% Figure 1 moved to appendix
+
+Simulating the system \emph{forwards} in time is straightforward on modern computers;
+the \emph{inverse} problem is much harder. In this project we focus on that inverse
+problem: given only a short, noisy observation of the trajectory $\mathbf{x}$ at some
+later time, can we recover the initial conditions $\theta$ at $t=0$?
+ 
+Because chaotic dynamics erase information about the system's history, many different
+starting configurations can produce almost the same observed trajectory. Reporting a
+single best-guess estimate would therefore be misleading. To be statistically honest,
+we report a full posterior distribution
+$p(\theta \mid \mathbf{x}) \propto p(\mathbf{x} \mid \theta)\, p(\theta)$, capturing
+all starting states consistent with the observation. For a chaotic system, a wide,
+uncertain posterior is the correct and expected outcome, and the failure mode would be a
+narrow posterior asserting a precision the data does not contain.
+ 
+Because the physical equations do not permit direct evaluation of the likelihood
+$p(\mathbf{x} \mid \theta)$, traditional inference methods struggle here. We therefore
+use Simulation-Based Inference (SBI) with the BayesFlow library: from a custom
+simulator we generate many synthetic pairs $(\theta, \mathbf{x})$ and train a neural
+network as an amortized posterior estimator, so that after training the posterior for
+any new observation is obtained in a single forward pass, with no re-fitting or MCMC.
+ 
+The primary objective of our analysis is to investigate how the \emph{timing} of the
+measurement affects our ability to infer the past. Our hypothesis is that if the model
+genuinely captures the physics of chaos, the posterior should widen (lower contraction)
+as the observation window occurs later; and, crucially, even as the model becomes less
+certain, it should remain well calibrated, with its reported uncertainty faithfully
+reflecting the loss of information.
+
+\section{Data}
+
+Because our problem relies on Simulation-Based Inference, we did not collect real-world
+experimental data. Our dataset consists entirely of synthetic simulations from a custom
+physics engine written in Python. The classical three-body problem has been studied
+extensively in dynamical astronomy~\cite{valtonen2006}, and simulation-based inference
+with neural networks has recently been applied to a range of inverse problems where the
+likelihood is intractable~\cite{radev2023}; our contribution is to use this framework to
+quantify how identifiability degrades with observation lateness in a chaotic setting.
+ 
+Since the network learns strictly from generated data, choosing a physically realistic
+prior $p(\theta)$ was one of the most critical steps. We restrict to a two-dimensional
+plane and fix the three masses to $m_1 = 1/6$, $m_2 = 2/6$, $m_3 = 3/6$ (ratio $1:2:3$,
+summing to one). Distinct masses are used deliberately: equal masses would introduce a
+permutation symmetry that produces posterior multimodality unrelated to chaos. All
+quantities are non-dimensionalised, with $G=1$ and the length unit chosen so the mean
+initial separation equals one.
+ 
+The full state normally needs 12 variables (positions and velocities of all three
+bodies). Fixing the centre of mass at the origin and setting total momentum to zero lets
+us compute the third body from the first two:
+\begin{equation}
+    \mathbf{r}_3 = -\frac{m_1\mathbf{r}_1 + m_2\mathbf{r}_2}{m_3}, \qquad
+    \mathbf{v}_3 = -\frac{m_1\mathbf{v}_1 + m_2\mathbf{v}_2}{m_3}.
+\end{equation}
+This reduces the target vector $\theta$ to 8 unknowns: the initial positions and
+velocities of bodies 1 and 2.
+ 
+\subsection{Sampling the Prior}
+We sample each initial condition in two steps. \textbf{Positions:} we place the three
+bodies uniformly within a disk (uniform in area), transform to the COM frame, and rescale
+so the mean pairwise separation is exactly 1. \textbf{Velocities:} assigning velocities
+carelessly usually makes the bodies fly apart. To keep the system bound, we compute the
+potential energy $W$ of the sampled positions and draw velocities from
+$\mathcal{N}(0, \sigma_v^2)$ with $\sigma_v = \sqrt{|W|/2}$. By the virial theorem this
+tunes the expected kinetic energy so that the virial ratio $2T/|W|$ is of order one, i.e.
+the system is bound but non-trivial.
+ 
+\subsection{Rejection Criteria}
+Chaotic gravity frequently produces configurations that stall the numerical solver, so we
+pass every candidate through a strict rejection filter, integrating it over a fine time
+grid and rejecting it if any of the following occurs:
+\begin{itemize}
+    \item \textbf{Ejection:} any two bodies drift further apart than an escape radius of $10.0$.
+    \item \textbf{Collision:} any two bodies come closer than a collision radius of $0.03$.
+    \item \textbf{Energy drift:} the relative total energy drifts by more than $10^{-8}$,
+    indicating numerical error.
+\end{itemize}
+Because of the chaotic dynamics, a large fraction of candidates was rejected---roughly
+$69\%$, dominated by early collisions. We kept generating until we had a clean dataset of
+$50{,}000$ training, $2{,}000$ validation and $2{,}000$ test simulations. The three splits
+use fixed, non-overlapping random-seed ranges, which guarantees no simulation is shared
+between them and rules out data leakage.
+ 
+%=====================================================================
+\section{Statistical Model and Simulator}
+%=====================================================================
+Since we cannot write a closed-form likelihood for chaotic interactions, the likelihood is
+defined implicitly by our simulator. This section describes the physics that generates true
+trajectories and the measurement model that generates noisy observations.
+ 
+\subsection{Physical Equations and Integration}
+The simulator computes each body's acceleration from Newtonian gravity. To prevent forces
+from diverging during close encounters (which would stall the integrator), we introduce a
+Plummer softening length $\epsilon = 0.02$:
+\begin{equation}
+    \frac{d^2 \mathbf{r}_i}{dt^2} = \sum_{j \neq i} m_j \,
+    \frac{\mathbf{r}_j - \mathbf{r}_i}{\left(\lVert \mathbf{r}_j - \mathbf{r}_i \rVert^2 + \epsilon^2\right)^{3/2}}.
+\end{equation}
+Because of softening, the conserved energy is not the standard Newtonian energy but the
+kinetic energy plus the \emph{softened} potential energy:
+\begin{equation}
+    E = \sum_{i=1}^{3} \tfrac{1}{2} m_i \lVert \mathbf{v}_i \rVert^2
+    - \sum_{i=1}^{3}\sum_{j=i+1}^{3}
+    \frac{m_i m_j}{\sqrt{\lVert \mathbf{r}_j - \mathbf{r}_i \rVert^2 + \epsilon^2}}.
+\end{equation}
+The same $\epsilon$ appears in the accelerations, the potential, and the energy check, so
+the model is internally self-consistent. Because energy is exactly conserved in the true
+dynamics, its relative drift over an integration is an \emph{independent} indicator of
+numerical error---the same quantity used in the rejection filter. We integrate with SciPy's
+\texttt{solve\_ivp} using the 8th-order adaptive Runge--Kutta method DOP853, with strict
+relative ($10^{-10}$) and absolute ($10^{-12}$) tolerances.
+ 
+\subsection{Measurement Model and Noise}
+A key part of the model is realistic observation. An observer rarely catches a chaotic
+system exactly at $t=0$; they observe it during a window at some later time. We first
+estimate the median Lyapunov exponent of the accepted systems, finding $\lambda \approx 0.72$,
+and set the observation window length to $T = 3/\lambda \approx 4.16$ time units. Rather than
+starting at $t=0$, each simulation draws a random measurement delay
+$t_0 \sim \mathcal{U}(0, 8.32)$, i.e. $t_0 \in [0, 6/\lambda]$. The trajectory is recorded as
+$K=10$ equally spaced snapshots over the interval $[t_0, t_0+T]$. The state $\theta$ is
+always the state at $t=0$; only the delay before observation changes.
+ 
+This delay is central to the project: it lets a single model span easy (early) to hard
+(late) measurements, and it makes the question ``how does recoverability change with
+lateness?'' answerable as an in-distribution measurement (Section~\ref{sec:results}). An
+earlier design used a fixed window and imitated a later start by truncating the observation
+at inference time; because that fed the network input shapes it had never seen in training,
+we replaced it with the random-$t_0$ design so every case stays in-distribution.
+ 
+Finally, no measurement is perfect. We add independent Gaussian noise to every recorded
+position and velocity. Although position and velocity carry different units and theoretically warrant separate noise scales, we assign a uniform baseline scale of $\sigma_x = \sigma_v = 0.01$ for simplicity, applied i.i.d. per snapshot. The result is a noisy $10 \times 12$ observation matrix $\mathbf{x}$.
+ 
+%=====================================================================
+\section{Approximator Architecture}
+%=====================================================================
+To estimate $p(\theta \mid \mathbf{x}, t_0)$ we build an amortized neural posterior estimator
+with BayesFlow, consisting of an adapter, a summary network, and an inference network.
+ 
+\subsection{Adapter}
+The adapter standardises all variables (subtracting the mean and dividing by the standard
+deviation across the batch) and casts them to \texttt{float32} for stable gradients. It groups
+the inputs into three roles: the target parameters $\theta$ (inference variables); the
+$10\times12$ noisy trajectory $\mathbf{x}$ (summary variables, passed to the summary network);
+and the delay $t_0$ (a direct inference condition). Supplying $t_0$ directly ensures the network
+knows how long the system has evolved, which is essential for handling the chaotic loss of
+information.
+ 
+\subsection{Summary Network}
+Because the observation $\mathbf{x}$ is a time series of 10 sequential snapshots, feeding it into
+a plain feed-forward network would discard its temporal structure. We therefore use BayesFlow's
+\texttt{TimeSeriesNetwork} as the summary network, configured with an output dimension of 64, so
+it compresses the $10\times12$ input into a fixed-length summary vector
+$h(\mathbf{x}) \in \mathbb{R}^{64}$. This is a time-aware architecture that processes the
+snapshots in order, capturing the temporal dynamics of the trajectory without explicit time-step
+embeddings. A time-aware network is the appropriate choice here precisely because permuting the
+snapshots would destroy the information; a permutation-invariant set network, suitable for
+exchangeable data, would be wrong for an ordered trajectory.
+ 
+\subsection{Inference Network}
+The inference network is a continuous normalizing flow based on Flow Matching~\cite{lipman2023}, conditioned on the
+summary vector $h(\mathbf{x})$ and the delay $t_0$. It learns to transform samples from a standard
+multivariate Gaussian into samples from the target posterior. We chose Flow Matching over a
+simpler coupling flow because the posteriors here are expected to be highly non-Gaussian, curved
+and multimodal, including ring-shaped supports (Section~\ref{sec:results}), which a coupling
+architecture restricted to near-elliptical shapes would struggle to represent. Flow Matching
+parameterises a continuous vector field with a multi-layer perceptron, an unconstrained form well
+suited to such complex topologies.
+ 
+For both networks we used the default BayesFlow hyperparameters. No explicit regularisation (such
+as dropout) was added: the large simulated dataset ($50{,}000$ samples) together with the
+measurement noise, which acts as data augmentation, was sufficient to prevent severe overfitting,
+as confirmed by the validation-loss behaviour (Section~\ref{sec:training}).
+
+%=====================================================================
+\section{Training Procedure}
+\label{sec:training}
+%=====================================================================
+Because our simulator is computationally expensive, we use offline (amortized) training: the
+dataset is generated once and stored, then the network is trained on it. Online training, which
+regenerates data every epoch, would be prohibitive given the cost of high-accuracy integration
+plus rejection sampling.
+ 
+\subsection{Optimization and Learning Rate}
+We optimise the summary and inference networks jointly. The Flow Matching objective minimises the
+squared error between the model's predicted vector field and the optimal-transport directions from
+the Gaussian base to the target. We use the AdamW optimiser with an initial learning rate of
+$5\times10^{-4}$ and a cosine-decay schedule with warmup: the rate ramps up over the first few
+epochs to stabilise early gradients, then anneals smoothly toward zero.
+ 
+\subsection{Training Budget and Early Stopping}
+We use a batch size of 64; with $50{,}000$ training samples this is $781$ steps per epoch. We set a
+maximum of 150 epochs but monitor the validation loss (on the $2{,}000$-sample validation set) and
+apply early stopping with a patience of 20 epochs. The validation loss fell sharply at first, then
+plateaued and drifted slightly upward; with no improvement for 20 consecutive epochs, training
+halted at epoch 88.
+ 
+Crucially, we did \emph{not} keep the final-epoch weights. We restored the weights from the epoch
+with the lowest validation loss, epoch 68. Saving the best-validation model rather than whichever
+epoch training happened to stop on was worth roughly a factor of four in calibration error, which is a
+larger effect than any architecture or dataset change we tried.
+ 
+
+ 
+%=====================================================================
+\section{Diagnostics}
+%=====================================================================
+Before trusting the estimator we validate it on the untouched $2{,}000$-sample test set. Throughout,
+we keep two questions separate: \emph{how much} the measurement tells us (contraction) and whether
+the stated uncertainty is \emph{honest} (calibration). These are orthogonal, which means a narrow posterior can
+be miscalibrated, a wide one is well calibrated.
+ 
+\subsection{Convergence}
+The validation loss decreased rapidly over the first ${\sim}40$ epochs before stabilising. Early
+stopping and restoration of the epoch-68 weights (validation loss $\approx 1.066$) gave a model that
+generalises well and avoids the slight overfitting seen in the final epochs.
+ 
+\subsection{Simulation-Based Calibration (SBC)}
+SBC verifies whether the stated uncertainty is honest. For each test simulation we draw 100 posterior
+samples and compute the rank of the true $\theta$ among them; if the model is perfectly calibrated,
+these ranks are uniformly distributed. We plot the rank ECDF against $95\%$ confidence bands (we use
+the ECDF form rather than rank histograms because it admits simultaneous confidence bands and needs no
+binning choice). Across the 8 parameters the ECDF curves lie only slightly outside the bands
+(see Appendix, Figure~\ref{fig:ecdf}). This small residual is expected when pooling test cases of very different
+posterior widths (mixing tight early measurements with wide late ones); the mean calibration error
+remains low ($\approx 0.02$), confirming that when the model is uncertain it is honest about it.
+ 
+\subsection{Posterior Contraction}
+To measure how much information the observation adds relative to the prior, we compute the posterior
+contraction per parameter:
+\begin{equation}
+    c = 1 - \frac{\mathrm{Var}[\theta \mid \mathbf{x}]}{\mathrm{Var}[\theta]}.
+\end{equation}
+A value near 1 means a tight, informative posterior; near 0 means the observation added almost
+nothing. Pooled over the whole test set the contraction is moderate and varies by parameter
+(see Appendix, Figure~\ref{fig:contraction}). But a pooled value is of limited use in a chaotic system. Its real
+value lies in how it \emph{fades} with the measurement delay $t_0$, which we examine next.
+ 
+\subsection{Recovery}
+As an additional check we plot the posterior mean against the ground truth for each parameter
+(see Appendix, Figure~\ref{fig:recovery}), with correlations in the range $0.5$--$0.7$. The scatter is substantial,
+but this is expected rather than a defect: perfect accuracy is not the goal, and for hard (late) cases
+the posterior mean should \emph{not} coincide with the true value, since the observation does not
+determine it. The rigorous test of correctness is calibration, not point accuracy.
+
+%=====================================================================
+\section{Inference and Results}
+\label{sec:results}
+%=====================================================================
+Because the project is entirely simulation-based, we have no external real-world dataset; we perform
+inference on the held-out test set, which provides both the observation and the ground-truth initial
+condition.
+ 
+The core question is whether the network correctly learns that chaos destroys information over time.
+To answer it, we bin the $2{,}000$ test simulations by their measurement delay $t_0$ (in Lyapunov
+units, $t_0 \times \lambda$) and compute the mean contraction and calibration error per bin. Because
+the model was trained on the same $t_0$ range, every bin is in-distribution, so this reads how
+identifiability changes with lateness honestly.
+ 
+\subsection{Chaos Summary}
+The resulting summary (see Appendix, Figure~\ref{fig:chaos}) shows a clear trend consistent with physical theory.
+For early measurements ($t_0 \times \lambda \approx 0.5$), the mean contraction is strong, around
+$0.76$: chaos has not yet scrambled the system, so the network narrows down the initial conditions
+well. As the delay grows, contraction falls steadily, reaching about $0.26$ for late measurements
+($t_0 \times \lambda \approx 5.5$)---the posterior has widened until it is nearly as broad as the
+prior. Yet across all delays the calibration error stays flat, between $0.02$ and $0.03$. In short:
+\emph{contraction fades, calibration survives}. As information about the initial condition decays
+exponentially, the model becomes appropriately less certain while remaining honest about exactly how
+much less certain it is.
+ 
+\subsection{Posterior Predictive Checks and Corner Plots}
+To check that these wide posteriors are physically realistic rather than a mathematical artifact, we perform a posterior predictive check on a late-measurement case: we draw samples from the posterior and re-simulate them forward. Within the observation window $[t_0, t_0+T]$, every re-simulated path closely tracks the observed noisy points---the samples are consistent with the data. But traced back
+into the unobserved past $[0, t_0]$, the paths spread vastly apart, covering roughly 7 units of space
+(see Appendix, Figure~\ref{fig:ppc}). This is the visual signature of chaos: completely different histories are
+compatible with the same late measurement. We stress that this check establishes consistency with the
+data, not closeness to the truth; only the calibration analysis establishes correctness.
+ 
+Finally, the full corner plot for a late measurement (see Appendix, Figure~\ref{fig:corner}) reveals the value of the
+Flow Matching architecture. Rather than an elliptical Gaussian blob, the posterior for the position of
+body 1 forms a distinct \emph{ring}: the distance of the body from the origin is well constrained, but
+its angular direction has been erased by chaotic mixing. A method restricted to elliptical posteriors
+could not represent this; the continuous normalizing flow captures it naturally.
+ 
+%=====================================================================
+\section{Limitations and Potential Improvements}
+%=====================================================================
+Two limitations are worth stating explicitly.
+ 
+\paragraph{Pooled calibration.} Our SBC rank ECDFs lie slightly outside the $95\%$ band when evaluated
+over the entire test set. Within each $t_0$ bin the calibration error is low ($\approx 0.02$); the
+pooled test, however, has far more statistical power and detects a small residual miscalibration that
+the per-bin measure cannot. Because the pooled set mixes tight early posteriors with wide late ones, the
+global metric can appear slightly distorted even when the model is well calibrated at any specific delay.
+A natural next step is to run a full SBC on narrow $t_0$ slices to confirm the residual is uniform across
+delays.
+ 
+\paragraph{Posterior support beyond the prior.} The Flow Matching network has no built-in knowledge of
+physical constraints. Prior samples are filtered by rejection, but posterior samples are not, and the
+smooth flow never saw the rejected region. As a result a small fraction of posterior draws (about
+$1.7\%$) land on near-collision configurations that the prior would have discarded, more often for late
+measurements where the posterior is wider. The interpretation is that the one-dimensional marginals are
+well calibrated but the joint distribution is not perfectly so: the set of initial conditions compatible
+with a measurement is thin and filament-like, and a smooth flow reproduces the marginal widths but not
+that fine geometry. Two improvements suggest themselves: embedding conservation laws into the loss (a
+physics-informed approach) to discourage impossible draws; and running SBC on conserved quantities such
+as energy and angular momentum, nonlinear functions of all eight parameters that would probe the joint
+structure directly, and which we already record but have not yet used as calibration test quantities.
+ 
+%=====================================================================
+\section{Conclusion}
+%=====================================================================
+In this project we applied Simulation-Based Inference to the classical chaotic three-body problem.
+Traditional methods often fail on chaotic systems because they seek a single, overconfident estimate,
+ignoring that chaos destroys historical information.
+ 
+Using an amortized neural posterior estimator based on Flow Matching, and explicitly feeding the
+measurement delay $t_0$ to the network, we quantified this loss of information. Three points summarise
+the work. First, in a chaotic system a wide posterior is the correct answer, not a failure: information
+decays exponentially at a rate set by $\lambda \approx 0.72$, and a method that stayed confident as the
+measurement started later would merely be misreporting its uncertainty. Second, contraction fades but
+calibration survives: across delays from $0.5$ to $5.5$ Lyapunov times, contraction falls from $0.76$ to
+$0.26$ while the calibration error stays flat between $0.02$ and $0.03$. Third, amortization is what made
+the analysis possible: a single model, trained once with $t_0$ as a known input, spans every delay
+regime, letting us measure how difficulty grows with $t_0$ over the whole test set at negligible cost.
+In a chaotic universe, being uncertain is scientifically accurate, and reporting that uncertainty
+correctly is the mark of an honest statistical model.
+ 
+%=====================================================================
+\section{Reflection on Own Learnings}
+%=====================================================================
+The most valuable lesson of this project was learning to treat a wide posterior as a result rather than
+a failure. Our intuition at the start was that a good model should produce sharp, confident answers, and
+an early design did exactly that, but its calibration checks failed systematically, exposing it as
+overconfident. Seeing this concretely taught us the difference between \emph{knowing a lot} and
+\emph{honestly reporting how much one knows}, and why calibration, not sharpness, is the right criterion
+for a posterior in a chaotic system.
+ 
+We also learned how much of simulation-based inference lives in the modelling choices around the network
+rather than in the network itself: designing a proper prior, keeping the simulator self-consistent (for
+instance using the same softening length in both the force and the energy), shaping the observation model
+so that a scientific question becomes an in-distribution measurement, and validating with SBC and
+posterior contraction. On the engineering side, the single most impactful change was saving the
+best-validation model rather than the final one, which is exactly a reminder that careful methodology can matter more
+than model complexity.
+
+
+\newpage
+\begin{thebibliography}{9}
+
+\bibitem{valtonen2006}
+Valtonen, M., \& Karttunen, H. (2006). \emph{The Three-Body Problem.} Cambridge University Press.
+
+\bibitem{radev2023}
+Radev, S.~T., Schmitt, M., Schumacher, L., Elsem\"uller, L., Pratz, V., Sch\"alte, Y., K\"othe, U.,
+\& B\"urkner, P.-C. (2023). \emph{BayesFlow: Amortized Bayesian Workflows with Neural Networks.}
+Journal of Open Source Software, 8(89), 5702.
+ 
+
+ 
+\bibitem{lipman2023}
+Lipman, Y., Chen, R.~T.~Q., Ben-Hamu, H., Nickel, M., \& Le, M. (2023).
+\emph{Flow Matching for Generative Modeling.} International Conference on Learning Representations (ICLR).
+\end{thebibliography}
+
+\newpage
+\appendix
+\section{Appendix: Figures}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.8\textwidth]{example_orbits.png}
+    \caption{Three simulated three-body systems. Identical physics, three different initial conditions, three completely different trajectories.}
+    \label{fig:illustrative}
+\end{figure}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{calibration_ecdf.png}
+    \caption{Rank ECDF deviation from uniform for each parameter, pooled over all $t_0$, with
+    $95\%$ confidence bands.}
+    \label{fig:ecdf}
+\end{figure}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.65\linewidth]{contraction.png}
+    \caption{Posterior contraction per parameter, pooled over all $t_0$. Moderate values are
+    expected because the test set mixes easy and hard cases.}
+    \label{fig:contraction}
+\end{figure}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{recovery.png}
+    \caption{Posterior mean against ground truth for all test simulations, with credible intervals.
+    Scatter is expected; accuracy is not the goal.}
+    \label{fig:recovery}
+\end{figure}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.8\linewidth]{chaos_summary.png}
+    \caption{Contraction (blue, left axis) and calibration error (red, right axis) versus measurement
+    lateness. Contraction falls from $0.76$ to $0.26$ while calibration error stays flat at
+    $0.02$--$0.03$. This is the central result of the project.}
+    \label{fig:chaos}
+\end{figure}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\linewidth]{posterior_predictive.png}
+    \caption{Re-simulated trajectories versus the noisy observation, for an early (left) and a late
+    (right) measurement. Solid: the observation window. Faint dashed: the earlier, unmeasured interval.}
+    \label{fig:ppc}
+\end{figure}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.6\linewidth]{posterior_example.png}
+    \caption{Posterior samples for the initial position of body 1. Blue: measured early. Red: measured
+    late. The cross marks the true value. The late case forms a ring.}
+    \label{fig:corner}
+\end{figure}
+
+\end{document}
